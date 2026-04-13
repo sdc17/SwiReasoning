@@ -26,7 +26,7 @@ Comparison of solving the same question with the same reasoning LLM (6s vs. 1min
 
 * Math: GSM8K, MATH500, AIME24, AIME25
 * Coding: HumanEval, LeetCode-Contest, MBPP, LiveCodeBench
-* Common: GPQA Diamond, 2WikiMultihopQA, CommonsenseQA
+* General: GPQA Diamond, 2WikiMultihopQA, CommonsenseQA
 
 ## 🔍 Supported Models
 
