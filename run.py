@@ -4,6 +4,7 @@ import argparse
 from tqdm import tqdm
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from generation_utils import (
@@ -13,6 +14,123 @@ from generation_utils import (
     generate_swir,
 )
 from grader import answer_match
+import concurrent.futures
+import multiprocessing
+
+
+def grade_batch_task(batch_data):
+    dataset_name = batch_data["dataset_name"]
+    questions = batch_data["questions"]
+    golds = batch_data["golds"]
+    preds = batch_data["preds"]
+    generated_ids_list = batch_data["generated_ids_list"]
+    prompt_len = batch_data["prompt_len"]
+    tokenizer = batch_data["tokenizer"]
+    model_name = batch_data["model_name"]
+    
+    grading_inputs = []
+    batch_details_skeleton = []
+    
+    for idx in range(len(questions)):
+        gold = golds[idx]
+        question = questions[idx]
+        pred = preds[idx]
+        
+        output_ids = generated_ids_list[idx][prompt_len:]
+        try:
+            if "Qwen3" in model_name: eot_id = 151668
+            elif "Llama" in model_name: eot_id = 128014
+            elif "QwQ" in model_name: eot_id = 151668
+            elif "Qwen" in model_name: eot_id = 151649
+            else: eot_id = 151649
+            if eot_id in output_ids:
+                index = len(output_ids) - output_ids[::-1].index(eot_id)
+            else:
+                index = 0
+        except ValueError:
+            index = 0
+            
+        thinking_content = tokenizer.decode(output_ids[:index], skip_special_tokens=True).strip()
+        answer_content = pred[len(thinking_content):]
+        
+        grading_inputs.append((dataset_name, answer_content, gold))
+        
+        gold_to_save = {k: v for k, v in gold.items() if k != "verification_info"} if isinstance(gold, dict) else gold
+        batch_details_skeleton.append({
+            "question": question,
+            "gold": gold_to_save,
+            "thinking": thinking_content,
+            "answer_content": answer_content,
+            "full_pred": pred 
+        })
+
+    
+    grading_results = []
+    PER_TASK_TIMEOUT = 60
+    try:
+        with multiprocessing.Pool(processes=8, maxtasksperchild=1) as pool:
+            async_results = []
+            for args in grading_inputs:
+                res = pool.apply_async(answer_match, args)
+                async_results.append(res)
+            
+            for i, res in enumerate(async_results):
+                try:
+                    result = res.get(timeout=PER_TASK_TIMEOUT)
+                    grading_results.append(result)
+                except multiprocessing.TimeoutError:
+                    print(f"  [WARNING] Task {i} timed out (>{PER_TASK_TIMEOUT}s). Skipping.")
+                    grading_results.append((False, "Timeout"))
+                except Exception as e:
+                    print(f"  [WARNING] Task {i} error: {e}")
+                    grading_results.append((False, f"Error: {str(e)}"))
+
+    except Exception as e:
+        print(f"Pool critical failure: {e}")
+        remaining = len(questions) - len(grading_results)
+        grading_results.extend([(False, "Pool Crash")] * remaining)
+
+    batch_correct = 0
+    batch_total = 0
+    batch_details = []
+    batch_total_lens = []
+    batch_correct_lens = []
+    batch_wrong_lens = []
+
+    if len(grading_results) < len(questions): ###
+        grading_results.extend([(False, "Missing")] * (len(questions) - len(grading_results)))
+    
+    for idx, (is_correct, prediction) in enumerate(grading_results):
+        skel = batch_details_skeleton[idx]
+        
+        batch_correct += int(is_correct)
+        batch_total += 1
+        
+        batch_details.append({
+            "question": skel["question"],
+            "gold": skel["gold"],
+            "prediction": prediction,
+            "correct": is_correct,
+            "thinking": skel["thinking"],
+            "answer_content": skel["answer_content"],
+        })
+        
+        output_token_ids = tokenizer.encode(skel["full_pred"], add_special_tokens=False)
+        t_len = len(output_token_ids)
+        batch_total_lens.append(t_len)
+        if is_correct:
+            batch_correct_lens.append(t_len)
+        else:
+            batch_wrong_lens.append(t_len)
+            
+    return {
+        "correct": batch_correct,
+        "total": batch_total,
+        "details": batch_details,
+        "total_lens": batch_total_lens,
+        "correct_lens": batch_correct_lens,
+        "wrong_lens": batch_wrong_lens
+    }
 
 
 def main(args):
@@ -44,6 +162,12 @@ def main(args):
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     tokenizer.padding_side = 'left'
+
+    is_async_mode = (dataset_name == "livecodebench") ### Coding only
+    if is_async_mode:
+        eval_tokenizer = AutoTokenizer.from_pretrained(model_name)
+        eval_tokenizer.padding_side = 'left'
+
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         torch_dtype="auto",
@@ -60,6 +184,18 @@ def main(args):
         dataset = load_dataset("yentinglin/aime_2025", split="train")
     elif dataset_name == "gpqa_diamond":
         dataset = load_dataset("hendrydong/gpqa_diamond_mc", split="test")
+    elif dataset_name == "2wikimqa":
+        dataset = load_dataset("THUDM/LongBench", "2wikimqa", split="test", trust_remote_code=True)
+    elif dataset_name == "commonsenseqa":
+        dataset = load_dataset("tau/commonsense_qa", "default", split="validation")
+    elif dataset_name == "humaneval":
+        dataset = load_dataset("openai/openai_humaneval", split="test")
+    elif dataset_name == "mbpp":
+        dataset = load_dataset("google-research-datasets/mbpp","sanitized", split="test")
+    elif dataset_name == "leetcode_contest":
+        dataset = load_dataset("TechxGenus/LeetCode-Contest", split="train")
+    elif dataset_name == "livecodebench":
+        dataset = load_dataset("PrimeIntellect/LiveCodeBench-v5", split="train")
     else:
         raise ValueError(f"Unsupported dataset: {dataset_name}")
     if n_samples is not None:
@@ -80,6 +216,12 @@ def main(args):
     math_symbols_ids = get_math_symbols_ids(tokenizer)
     math_ids_tensor = torch.tensor(list(math_symbols_ids), device=model.device)
     
+    thread_executor = None ### Coding only
+    futures = []
+    if is_async_mode:
+        thread_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        print(f"[Rank {local_rank}] Async grading pipeline ENABLED for {dataset_name}.")
+
     for i in tqdm(range(0, len(dataset), batch_size), desc="Evaluating"):
         batch = dataset.select(range(i, min(i + batch_size, len(dataset))))
         if args.dataset_name == "gsm8k":
@@ -97,10 +239,178 @@ def main(args):
         elif args.dataset_name == "gpqa_diamond":
             questions = batch["problem"]
             golds = [str(a).strip() for a in batch["solution"]]
-        prompts = [
-            f"{q}\nPlease reason step by step, and put your final answer within \\boxed{{}}."
-            for q in questions
-        ]
+        elif args.dataset_name == "2wikimqa":
+            questions = [
+                f"Question: {q}\n\nContext:\n{ctx}"
+                for q, ctx in zip(batch["input"], batch["context"])
+            ]
+            golds = [ans_list for ans_list in batch["answers"]]
+        elif args.dataset_name == "commonsenseqa":
+            questions = batch["question"]
+            golds = [
+                {
+                    "id": id_,
+                    "question": question,
+                    "question_concept": question_concept,
+                    "choices": choices, 
+                    "answerKey": answer_key,
+                }
+                for id_, question, question_concept, choices, answer_key in zip(
+                    batch["id"],
+                    batch["question"],
+                    batch["question_concept"],
+                    batch["choices"],
+                    batch["answerKey"],
+                )
+            ]
+        elif args.dataset_name == "humaneval":
+            questions = batch["prompt"]
+            golds = [
+                {
+                    "task_id": task_id,
+                    "prompt": prompt,
+                    "canonical_solution": canonical_solution,
+                    "test": test,
+                    "entry_point": entry_point,
+                }
+                for task_id, prompt, canonical_solution, test, entry_point in zip(
+                    batch["task_id"],
+                    batch["prompt"],
+                    batch["canonical_solution"],
+                    batch["test"],
+                    batch["entry_point"],
+                )
+            ]
+        elif args.dataset_name == "mbpp":
+            questions = batch["prompt"]
+            golds = [
+                {
+                    "task_id": task_id,
+                    "prompt": prompt,
+                    "code": code,
+                    "test_imports": test_imports,
+                    "test_list": test_list,
+                }
+                for task_id, prompt, code, test_imports, test_list in zip(
+                    batch["task_id"],
+                    batch["prompt"],
+                    batch["code"],
+                    batch["test_imports"],
+                    batch["test_list"],
+                )
+            ]
+        elif args.dataset_name == "leetcode_contest":
+            questions = batch["prompt_sft"]
+            golds = [
+                {
+                    "task_id": task_id,
+                    "url": url,
+                    "title": title,
+                    "meta": meta,
+                    "prompt": prompt,          
+                    "prompt_sft": prompt_sft,
+                    "test": test,
+                }
+                for task_id, url, title, meta, prompt, prompt_sft, test in zip(
+                    batch["task_id"],
+                    batch["url"],
+                    batch["title"],
+                    batch["meta"],
+                    batch["prompt"],
+                    batch["prompt_sft"],
+                    batch["test"],
+                )
+            ]
+        elif args.dataset_name == "livecodebench":
+            questions = batch["prompt"]
+            golds = [
+                {
+                    "problem_id": problem_id,
+                    "task_type": task_type,
+                    "prompt": prompt,
+                    "verification_info": verification_info,
+                }
+                for problem_id, task_type, prompt, verification_info in zip(
+                    batch["problem_id"],
+                    batch["task_type"],
+                    batch["prompt"],
+                    batch["verification_info"],
+                )
+            ]
+
+        if args.dataset_name == "2wikimqa":
+            prompts = []
+            for q in questions:
+                prompts.append(
+                    f"{q}\n\n"
+                    "Please answer the question based on the context.\n"
+                    f"Please reason step by step, and put your final answer within \\boxed{{}}.\n"
+                    "Your final answer should be a short phrase.\n"
+                )
+        elif args.dataset_name == "commonsenseqa":
+            prompts = []
+            for q, gold in zip(questions, golds):
+                labels = gold["choices"]["label"]
+                texts = gold["choices"]["text"]
+                option_lines = [f"({lab}) {txt}" for lab, txt in zip(labels, texts)]
+                options_str = "\n".join(option_lines)
+                prompts.append(
+                    "You are an expert at commonsense reasoning.\n"
+                    "You will be given a question and five answer choices (A, B, C, D, E).\n"
+                    "Please reason step by step, then give only the letter of the correct option as your final answer.\n"
+                    f"Put your final answer letter inside \\boxed{{}}.\n\n"
+                    f"Question: {q}\n\n"
+                    f"Choices:\n{options_str}\n"
+                )
+        elif args.dataset_name == "humaneval":
+            prompts = []
+            for q in questions:
+                prompts.append(
+                    "You are an expert Python programmer.\n"
+                    "Complete the following Python function so that it passes the tests.\n"
+                    "Please reason step by step.\n"
+                    "Write only valid Python code and do not include any explanations.\n\n"
+                    f"{q}"
+                )
+        elif args.dataset_name == "mbpp":
+            prompts = []
+            for q, gold in zip(questions, golds):
+                tests_preview = "\n".join(gold["test_list"])
+                prompts.append(
+                    "You are an expert Python programmer.\n"
+                    "Here is your task:\n"
+                    f"{q}\n\n"
+                    "Your code should pass the following tests:\n"
+                    f"{tests_preview}\n\n"
+                    "Please reason step by step.\n"
+                    "Write only Python code and do not include any explanations.\n"
+                )
+        elif args.dataset_name == "leetcode_contest":
+            prompts = []
+            for q in questions:
+                prompts.append(
+                    "You are an expert competitive programmer.\n"
+                    "Solve the following LeetCode contest problem in Python.\n"
+                    "Write a class named `Solution` implementing the required method(s).\n"
+                    "Please reason step by step.\n"
+                    "Output only valid Python code, without any explanations or backticks.\n\n"
+                    f"{q}"
+                )
+        elif args.dataset_name == "livecodebench":
+            prompts = []
+            for q in questions:
+                prompts.append(
+                    q
+                    + "\n\n"
+                    "You will be given a question (problem specification) and will generate a correct Python program that matches the specification and passes all tests.\n"
+                    "Please reason step by step.\n"
+                )
+
+        else:
+            prompts = [
+                f"{q}\nPlease reason step by step, and put your final answer within \\boxed{{}}."
+                for q in questions
+            ]
         messages_batch = [[{"role": "user", "content": prompt}] for prompt in prompts]
         texts = [
             tokenizer.apply_chat_template(
@@ -152,45 +462,88 @@ def main(args):
                 )
         
         prompt_len = model_inputs["input_ids"].shape[1]
-        preds = [
-            tokenizer.decode(generated_ids[idx][prompt_len:], skip_special_tokens=True)
-            for idx in range(len(questions))
-        ]
-    
-        for idx in range(len(questions)):
-            gold = golds[idx]
-            question = questions[idx]
-            pred = preds[idx]
-            output_ids = generated_ids[idx][prompt_len:].tolist()
-            try:
-                eot_id = 128014 if "Llama" in model_name else 151668
-                index = len(output_ids) - output_ids[::-1].index(eot_id)
-            except ValueError:
-                index = 0
-            thinking_content = tokenizer.decode(output_ids[:index], skip_special_tokens=True).strip()
-            answer_content = pred[len(thinking_content):]
-            is_correct, prediction = answer_match(dataset_name, answer_content, gold)
-            correct += int(is_correct)
-            total += 1
-            details.append({
-                "question": question,
-                "gold": gold,
-                "prediction": prediction,
-                "correct": is_correct,
-                "thinking": thinking_content,
-                "answer_content": answer_content,
-            })
-            if total % 20 == 0:
-                print(f"Processed {total} examples, Accuracy: {correct/total:.2%}")
-                
-            output_token_ids = tokenizer.encode(pred, add_special_tokens=False)
-            total_token_len = len(output_token_ids)
-            total_token_lens.append(total_token_len)
-            if is_correct:
-                correct_token_lens.append(total_token_len)
-            else:
-                wrong_token_lens.append(total_token_len)
 
+        if is_async_mode: ### Coding only
+            generated_ids_cpu_list = generated_ids.cpu().tolist()
+            
+            current_preds = [
+                tokenizer.decode(generated_ids_cpu_list[idx][prompt_len:], skip_special_tokens=True)
+                for idx in range(len(questions))
+            ]
+            
+            batch_data = {
+                "dataset_name": dataset_name,
+                "questions": questions,
+                "golds": golds,
+                "preds": current_preds,
+                "generated_ids_list": generated_ids_cpu_list, 
+                "prompt_len": prompt_len,
+                "tokenizer": eval_tokenizer, 
+                "model_name": model_name
+            }
+            future = thread_executor.submit(grade_batch_task, batch_data)
+            futures.append(future)
+        else:
+            preds = [
+                tokenizer.decode(generated_ids[idx][prompt_len:], skip_special_tokens=True)
+                for idx in range(len(questions))
+            ]
+        
+            for idx in range(len(questions)):
+                gold = golds[idx]
+                question = questions[idx]
+                pred = preds[idx]
+                output_ids = generated_ids[idx][prompt_len:].tolist()
+                try:
+                    if "Qwen3" in model_name:
+                        eot_id = 151668
+                    elif "Llama" in model_name:
+                        eot_id = 128014
+                    elif "QwQ" in model_name:
+                        eot_id = 151668
+                    elif "Qwen" in model_name: ### Qwen2.5
+                        eot_id = 151649
+                    index = len(output_ids) - output_ids[::-1].index(eot_id)
+                except ValueError:
+                    index = 0
+                thinking_content = tokenizer.decode(output_ids[:index], skip_special_tokens=True).strip()
+                answer_content = pred[len(thinking_content):]
+                is_correct, prediction = answer_match(dataset_name, answer_content, gold)
+                correct += int(is_correct)
+                total += 1
+                if args.dataset_name == "livecodebench": ### Too large to save verification_info
+                    gold = {k: v for k, v in gold.items() if k != "verification_info"}
+                details.append({
+                    "question": question,
+                    "gold": gold,
+                    "prediction": prediction,
+                    "correct": is_correct,
+                    "thinking": thinking_content,
+                    "answer_content": answer_content,
+                })
+                if total % 20 == 0:
+                    print(f"Processed {total} examples, Accuracy: {correct/total:.2%}")
+                    
+                output_token_ids = tokenizer.encode(pred, add_special_tokens=False)
+                total_token_len = len(output_token_ids)
+                total_token_lens.append(total_token_len)
+                if is_correct:
+                    correct_token_lens.append(total_token_len)
+                else:
+                    wrong_token_lens.append(total_token_len)
+
+    if is_async_mode: ### Coding only
+        print(f"[Rank {local_rank}] Generation finished. Waiting for background grading threads...")
+        thread_executor.shutdown(wait=True)
+        
+        for future in futures:
+            res = future.result()
+            correct += res["correct"]
+            total += res["total"]
+            details.extend(res["details"])
+            total_token_lens.extend(res["total_lens"])
+            correct_token_lens.extend(res["correct_lens"])
+            wrong_token_lens.extend(res["wrong_lens"])
     print(f"Total: {total}, Correct: {correct}, Accuracy: {correct/total:.2%}")
     
     avg = lambda l: float(sum(l)) / len(l) if l else 0.0

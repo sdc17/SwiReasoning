@@ -22,6 +22,16 @@ https://github.com/user-attachments/assets/6b18911c-efe4-47fd-8a00-3cd9ae1eb010
 
 Comparison of solving the same question with the same reasoning LLM (6s vs. 1min).
 
+## 🔍 Supported Benchmarks
+
+* Math: GSM8K, MATH500, AIME24, AIME25
+* Coding: HumanEval, LeetCode-Contest, MBPP, LiveCodeBench
+* Common: GPQA Diamond, 2WikiMultihopQA, CommonsenseQA
+
+## 🔍 Supported Models
+
+* Qwen3 and DeepSeek-R1 model families across 1.7B to 32B
+
 ## ⚙️ Getting Started
 
 ### Clone the project
@@ -77,6 +87,9 @@ python merge.py --model_name Qwen/Qwen3-8B --dataset_name gsm8k --max_new_tokens
 We thank the contributors of open-source projects [Transformers](https://github.com/huggingface/transformers), [Qwen3](https://github.com/QwenLM/Qwen3), and [Soft-Thinking](https://github.com/eric-ai-lab/Soft-Thinking).
 
 ## ✨ BibTeX
+
+Please cite if you find our codebase helpful.
+
 ```bash
 @misc{shi2025swireasoningswitchthinkinglatentexplicit,
       title={SwiReasoning: Switch-Thinking in Latent and Explicit for Pareto-Superior Reasoning LLMs}, 
