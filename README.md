@@ -80,6 +80,7 @@ python merge.py --model_name Qwen/Qwen3-8B --dataset_name gsm8k --max_new_tokens
 ```
 * Increase ``--nproc_per_node`` to enable faster evaluation on multiple GPUs. 
 * Modify ``--model_name`` and ``--dataset_name`` for evaluation with different models and datasets.
+* Please use ``TOKENIZERS_PARALLELISM=false`` before ``torchrun`` when evaluating on LiveCodeBench.
 * Please check [run.sh](./run.sh) for more examples.
 
 ## 💬 Acknowledgments
