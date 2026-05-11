@@ -27,6 +27,7 @@ def grade_batch_task(batch_data):
     prompt_len = batch_data["prompt_len"]
     tokenizer = batch_data["tokenizer"]
     model_name = batch_data["model_name"]
+    eot_id = batch_data["eot_id"]
     
     grading_inputs = []
     batch_details_skeleton = []
@@ -38,11 +39,6 @@ def grade_batch_task(batch_data):
         
         output_ids = generated_ids_list[idx][prompt_len:]
         try:
-            if "Qwen3" in model_name: eot_id = 151668
-            elif "Llama" in model_name: eot_id = 128014
-            elif "QwQ" in model_name: eot_id = 151668
-            elif "Qwen" in model_name: eot_id = 151649
-            else: eot_id = 151649
             if eot_id in output_ids:
                 index = len(output_ids) - output_ids[::-1].index(eot_id)
             else:
@@ -162,6 +158,12 @@ def main(args):
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     tokenizer.padding_side = 'left'
+    eot_id = tokenizer.convert_tokens_to_ids("</think>")
+    if eot_id is None or eot_id == tokenizer.unk_token_id:
+        eot_ids = tokenizer.encode("</think>", add_special_tokens=False)
+        if len(eot_ids) != 1:
+            raise ValueError(f"Cannot resolve </think> to a single token id: {eot_ids}")
+        eot_id = eot_ids[0]
 
     is_async_mode = (dataset_name == "livecodebench") ### Coding only
     if is_async_mode:
@@ -479,7 +481,8 @@ def main(args):
                 "generated_ids_list": generated_ids_cpu_list, 
                 "prompt_len": prompt_len,
                 "tokenizer": eval_tokenizer, 
-                "model_name": model_name
+                "model_name": model_name,
+                "eot_id": eot_id
             }
             future = thread_executor.submit(grade_batch_task, batch_data)
             futures.append(future)
@@ -495,14 +498,6 @@ def main(args):
                 pred = preds[idx]
                 output_ids = generated_ids[idx][prompt_len:].tolist()
                 try:
-                    if "Qwen3" in model_name:
-                        eot_id = 151668
-                    elif "Llama" in model_name:
-                        eot_id = 128014
-                    elif "QwQ" in model_name:
-                        eot_id = 151668
-                    elif "Qwen" in model_name: ### Qwen2.5
-                        eot_id = 151649
                     index = len(output_ids) - output_ids[::-1].index(eot_id)
                 except ValueError:
                     index = 0
