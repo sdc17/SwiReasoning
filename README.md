@@ -4,6 +4,9 @@
 </div>
 
 <p align="center">
+    <a href="https://proceedings.iclr.cc/paper_files/paper/2026/file/ddb7bad46132a323aa9d039000941881-Paper-Conference.pdf">
+        <img alt="Paper" src="https://img.shields.io/badge/Paper-ICLR26-red?logo=adobeacrobatreader&logoColor=white" />
+    </a>
     <a href="https://arxiv.org/pdf/2510.05069">
         <img alt="ArXiv" src="https://img.shields.io/badge/arXiv-2510.05069-B31B1B?logo=arxiv" />
     </a>
@@ -93,14 +96,15 @@ We thank the contributors of open-source projects [Transformers](https://github.
 Please cite if you find our codebase helpful.
 
 ```bash
-@misc{shi2025swireasoningswitchthinkinglatentexplicit,
-      title={SwiReasoning: Switch-Thinking in Latent and Explicit for Pareto-Superior Reasoning LLMs}, 
-      author={Dachuan Shi and Abedelkadir Asi and Keying Li and Xiangchi Yuan and Leyan Pan and Wenke Lee and Wen Xiao},
-      year={2025},
-      eprint={2510.05069},
-      archivePrefix={arXiv},
-      primaryClass={cs.CL},
-      url={https://arxiv.org/abs/2510.05069}, 
+@inproceedings{ICLR2026_ddb7bad4,
+ author = {Shi, Dachuan and Asi, Abedelkadir and Li, Keying and Yuan, Xiangchi and Pan, Leyan and Lee, Wenke and Xiao, Wen},
+ booktitle = {International Conference on Learning Representations},
+ editor = {C. Vondrick and B. Hariharan and C. Raffel and L. Pinto and D. Yang and A. Faust},
+ pages = {137060--137093},
+ title = {SwiReasoning: Switch-Thinking in Latent and Explicit for Pareto-Superior Reasoning LLMs},
+ url = {https://proceedings.iclr.cc/paper_files/paper/2026/file/ddb7bad46132a323aa9d039000941881-Paper-Conference.pdf},
+ volume = {2026},
+ year = {2026}
 }
 ```
 
